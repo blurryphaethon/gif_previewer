@@ -324,7 +324,12 @@ function draw(x,y) {
       // But only hide them if they are in the list of default visible attributes
       if (visibleAttributes.indexOf(compareSpriteSource) < 0 && defaultImage[compareSpriteSource].src != null) continue;
       
-      if (compareSpriteSource === "SHIELD") {
+      if (
+          compareSpriteSource === "SHIELD" ||
+          compareSpriteSource === "HEAD" ||
+          compareSpriteSource === "ATTR1" ||
+          compareSpriteSource === "SWORD"
+      ) {
       	sx = spriteObject.sx;
         sy = spriteObject.sy;
         sw = spriteObject.sw;
@@ -332,26 +337,31 @@ function draw(x,y) {
         tx = drawx;
         ty = drawy;
         
-        let shieldImage = getDrawableImage(compareSpriteSource);
-        imgw = shieldImage.width;
-        imgh = shieldImage.height;
+        let drawImage = getDrawableImage(compareSpriteSource);
+        imgw = drawImage.width;
+        imgh = drawImage.height;
         
-        if (imgw != 38) {
-          sx = (sx * imgw) / 38;
-          oldw = sw;
-          sw = (sw * imgw) / 38;
-          tx = tx - (sw - oldw)/2;
-        }
-        if (imgh != 20) {
-          sy = (sy * imgh) / 20;
-          oldh = sh;
-          sh = (sh * imgh) / 20;
-          ty = ty - (sh - oldh)/2;
+        if (compareSpriteSource === "SHIELD") {
+            if (imgw != 38) {
+                sx = (sx * imgw) / 38;
+                oldw = sw;
+                sw = (sw * imgw) / 38;
+                tx = tx - (sw - oldw)/2;
+            }
+
+            if (imgh != 20) {
+                sy = (sy * imgh) / 20;
+                oldh = sh;
+                sh = (sh * imgh) / 20;
+                ty = ty - (sh - oldh)/2;
+            }
+
+
         }
         
        if (defaultConvertGanis.indexOf(gani.file) >= 0 && gani.dir == 2 && spriteObject.index == 12) tx += 16;
 
-        context.drawImage(shieldImage,sx,sy,sw,sh,tx,ty,sw,sh);
+        context.drawImage(drawImage, sx, sy, sw, sh, tx, ty, sw, sh);
       } else {
         context.drawImage(defaultImage[compareSpriteSource],spriteObject.sx,spriteObject.sy,spriteObject.sw,spriteObject.sh,drawx, drawy,spriteObject.sw,spriteObject.sh);
         
@@ -515,8 +525,10 @@ async function loadGifImageFile(file) {
     let animation = decodeGifToAnimation(arrayBuffer);
     let imgType = getImageType(file.name, animation);
 
-    if (imgType !== "SHIELD") {
-      alert("Animated GIF support is currently only available for shields.");
+    const supported = ["SHIELD", "HEAD", "ATTR1", "SWORD"];
+
+    if (!supported.includes(imgType)) {
+      alert("Animated GIFs are only supported for shields, heads, hats, and swords.");
       return;
     }
 
@@ -524,12 +536,12 @@ async function loadGifImageFile(file) {
     incrementServerStat("uploads_" + imgType);
 
     if (animation.frames.length > 1) {
-      animatedImages.SHIELD = animation;
+      animatedImages[imgType] = animation;
     } else {
-      clearAnimatedImage("SHIELD");
+      clearAnimatedImage(imgType);
     }
 
-    defaultImage.SHIELD = animation.frames[0].canvas;
+    defaultImage[imgType] = animation.frames[0].canvas;
   } catch (err) {
     alert("Could not read that GIF file.");
   }
