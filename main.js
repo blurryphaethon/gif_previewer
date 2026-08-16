@@ -48,6 +48,49 @@ var visibleAttributes = ["SPRITES","HEAD","BODY","ATTR1","ATTR2","ATTR4","HORSE"
 var defaultImage = {};
 var animatedImages = {};
 
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+const MAX_IMAGE_PIXELS = 16 * 1024 * 1024;
+const MAX_GIF_FRAMES = 300;
+const SUPPORTED_FILE_EXTENSIONS = [".gif", ".png", ".gani"];
+
+function setStatus(message, isError = false) {
+  let status = document.getElementById("status");
+  if (status == null) return;
+  status.textContent = message;
+  status.style.color = isError ? "#a00" : "#060";
+}
+
+function getFileExtension(fileName) {
+  let extensionStart = fileName.lastIndexOf(".");
+  return extensionStart >= 0 ? fileName.slice(extensionStart).toLowerCase() : "";
+}
+
+function validateSelectedFile(file) {
+  if (file == null) throw new Error("Choose a PNG, GIF, or GANI file first.");
+  if (!SUPPORTED_FILE_EXTENSIONS.includes(getFileExtension(file.name))) {
+    throw new Error("Only PNG, GIF, and GANI files are supported.");
+  }
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    throw new Error("That file is larger than the 10 MB preview limit.");
+  }
+}
+
+function validateImageDimensions(width, height) {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error("The image dimensions are invalid.");
+  }
+  if (width * height > MAX_IMAGE_PIXELS) {
+    throw new Error("That image is too large to preview safely (limit: 16 megapixels).");
+  }
+}
+
+function isValidGaniText(text) {
+  let trimmed = text.trim();
+  return trimmed.startsWith("GANI0001") ||
+    trimmed.startsWith("GANI0FP4") ||
+    (/^SPRITE\s/m.test(trimmed) && /^ANI\s*$/m.test(trimmed) && /^ANIEND\s*$/m.test(trimmed));
+}
+
 function preloadImages() {
   for (let i of Object.keys(defaultImageSource)) {
     defaultImage[i] = new Image();
@@ -124,19 +167,19 @@ document.addEventListener('keydown', e => {
   let dirKeys = [37,38,39,40];
   
   let keyMaps = [
-    [38,"walk(0)"],
-    [37,"walk(1)"],
-    [40,"walk(2)"],
-    [39,"walk(3)"],
-    [83,"loadInternalGani('sword.gani')"],
-    [65,"loadInternalGani('grab.gani')"],
+    [38, () => walk(0)],
+    [37, () => walk(1)],
+    [40, () => walk(2)],
+    [39, () => walk(3)],
+    [83, () => loadInternalGani('sword.gani')],
+    [65, () => loadInternalGani('grab.gani')],
   ];
   
-  for (let i of keyMaps) {
-    if (event.keyCode == i[0]) {
+  for (let [keyCode, action] of keyMaps) {
+    if (e.keyCode == keyCode) {
       e.preventDefault();
-      eval(i[1]);
-      if (dirKeys.includes(i[0])) {
+      action();
+      if (dirKeys.includes(keyCode)) {
         if (gani.file == "idle.gani") {
           loadInternalGani("walk.gani");
           walking = true;
@@ -197,7 +240,7 @@ function getCanvasWidth() {
 }
 
 function getCanvasHeight() {
-  return canvas.width/oz;
+  return canvas.height/oz;
 }
 
 // alternative to DOMContentLoaded
@@ -515,31 +558,49 @@ body.addEventListener('dragover', (event) => {
   event.dataTransfer.dropEffect = 'copy';
 });
 
-body.addEventListener('drop', (event) => {
+body.addEventListener('drop', async (event) => {
   event.stopPropagation();
   event.preventDefault();
   const fileList = event.dataTransfer.files;
   
   for (const file of fileList) {
-    if (!file) continue;
-    
-    if (file.type.match(/image.*/) || isGifFile(file)) {
-      loadImageFile(file);
-    } else if (file.name.endsWith(".gani")) loadExternalGani(file);
+    try {
+      validateSelectedFile(file);
+      if (isGifFile(file) || getFileExtension(file.name) === ".png") {
+        await loadImageFile(file);
+      } else {
+        await loadExternalGani(file);
+      }
+    } catch (error) {
+      console.error(error);
+      setStatus(error.message || "Could not load that file.", true);
+    }
   }
 });
 
-uploader.onchange = () => {
+uploader.onchange = async () => {
   const file = uploader.files[0];
-  //console.log("File uploaded: " + file.name);
-  
-  if (file.type.match(/image.*/) || isGifFile(file)) {
-    loadImageFile(file);
-  } else if (file.name.endsWith(".gani")) loadExternalGani(file);
+  try {
+    validateSelectedFile(file);
+    if (isGifFile(file) || getFileExtension(file.name) === ".png") {
+      await loadImageFile(file);
+    } else {
+      await loadExternalGani(file);
+    }
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Could not load that file.", true);
+  }
 }
 
 function isGifFile(file) {
   return file.type === "image/gif" || file.name.toLowerCase().endsWith(".gif");
+}
+
+function validateAssetTypeForFilename(fileName, imageType) {
+  if (fileName.toLowerCase().includes("accessory") && imageType !== "ATTR4") {
+    throw new Error("This accessory image is not a raw 240×144 or 240×192 accessory sheet. Upload the source asset, not a composed character preview.");
+  }
 }
 
 function getDrawableImage(imgType) {
@@ -580,11 +641,16 @@ function decodeGifToAnimation(arrayBuffer) {
   let reader = new GifReader(new Uint8Array(arrayBuffer));
   let width = reader.width;
   let height = reader.height;
+  let frameCount = reader.numFrames();
+  validateImageDimensions(width, height);
+  if (frameCount <= 0 || frameCount > MAX_GIF_FRAMES) {
+    throw new Error("That GIF has too many frames to preview safely (limit: 300).");
+  }
   let pixels = new Uint8Array(width * height * 4);
   let savedPixels = null;
   let frames = [];
 
-  for (let i = 0; i < reader.numFrames(); i++) {
+  for (let i = 0; i < frameCount; i++) {
     let info = reader.frameInfo(i);
     if (i > 0) {
       let previous = reader.frameInfo(i - 1);
@@ -613,18 +679,19 @@ async function loadGifImageFile(file) {
 
     let animation = decodeGifToAnimation(await readFileAsArrayBuffer(file));
     let imgType = getImageType(file.name, animation.frames[0].canvas);
+    validateAssetTypeForFilename(file.name, imgType);
     const supported = ["SHIELD", "HEAD", "ATTR1", "ATTR4", "SWORD"];
     if (!supported.includes(imgType)) {
-      alert("Animated GIFs are only supported for shields, accessories, heads, hats, and swords.");
-      return;
+      throw new Error("Animated GIFs are only supported for shields, accessories, heads, hats, and swords.");
     }
 
     if (animation.frames.length > 1) animatedImages[imgType] = animation;
     else delete animatedImages[imgType];
     defaultImage[imgType] = animation.frames[0].canvas;
+    setStatus(`Loaded ${file.name} as an animated ${imgType.toLowerCase()}.`);
   } catch (error) {
     console.error(error);
-    alert("Could not read that GIF file.");
+    setStatus(error.message || "Could not read that GIF file.", true);
   }
 }
 
@@ -644,56 +711,62 @@ async function loadImageFile(file) {
     const year = new Date(file.lastModified).getFullYear();
   
     img.onload = function() {
-      imgType = getImageType(file.name,img);
+      try {
+        validateImageDimensions(img.width, img.height);
+        imgType = getImageType(file.name,img);
+        validateAssetTypeForFilename(file.name, imgType);
 
-      console.log(imgType + " " + gani.file);
-      
-      if (imgType == null) {
-        alert("That is an unsupported custom!");
-        return;
-      }
-
-      delete animatedImages[imgType];
-            
-      if (imgType === "HORSE") {
-        if (img.height == 864) {
-          loadInternalGani("bigmount.gani");
-        } else {
-          loadInternalGani("mount.gani");
+        if (imgType == null) {
+          throw new Error("That is an unsupported custom!");
         }
-      } else if (imgType === "ATTR2" && img.height == 768) {
-        loadInternalGani("2pmount.gani");
-      } 
-      // Pet stuff
-      /*else if (imgType === "ATTR3" && img.width == 208 && img.height == 48) {
-        console.log("pet hat");
-        loadInternalGani("classicpet_largedog-walk.gani");
-        defaultImage["ATTR1"] = new Image();
-        defaultImage["ATTR1"].src = defaultImageSource["PET"];
-        defaultImage["ATTR4"] = new Image();
-        defaultImage["ATTR4"].src = defaultImageSource["PARAM1"];
-      } else if (imgType === "ATTR4" && img.width == 208 && img.height == 96) {
-        console.log("pet accessory");
-        loadInternalGani("classicpet_largedog-walk.gani");
-        defaultImage["ATTR3"] = new Image();
-        defaultImage["ATTR3"].src = defaultImageSource["PARAM1"];
-        defaultImage["ATTR1"] = new Image();
-        defaultImage["ATTR1"].src = defaultImageSource["PET"];
-      } */
-      else if (imgType == "PARAM1" && customGaniPersist == false) {
-        let tryParam = getParamGani(img);
-        if (tryParam != null) {
-          loadInternalGani(tryParam);
-        }
-      }
-      
-      defaultImage[imgType] = new Image();
-      defaultImage[imgType].src = getGraalSafeImage(img,(year > 2012 && imgType != "BODY"));
 
+        delete animatedImages[imgType];
+
+        if (imgType === "HORSE") {
+          if (img.height == 864) {
+            loadInternalGani("bigmount.gani");
+          } else {
+            loadInternalGani("mount.gani");
+          }
+        } else if (imgType === "ATTR2" && img.height == 768) {
+          loadInternalGani("2pmount.gani");
+        }
+        // Pet stuff
+        /*else if (imgType === "ATTR3" && img.width == 208 && img.height == 48) {
+          console.log("pet hat");
+          loadInternalGani("classicpet_largedog-walk.gani");
+          defaultImage["ATTR1"] = new Image();
+          defaultImage["ATTR1"].src = defaultImageSource["PET"];
+          defaultImage["ATTR4"] = new Image();
+          defaultImage["ATTR4"].src = defaultImageSource["PARAM1"];
+        } else if (imgType === "ATTR4" && img.width == 208 && img.height == 96) {
+          console.log("pet accessory");
+          loadInternalGani("classicpet_largedog-walk.gani");
+          defaultImage["ATTR3"] = new Image();
+          defaultImage["ATTR3"].src = defaultImageSource["PARAM1"];
+          defaultImage["ATTR1"] = new Image();
+          defaultImage["ATTR1"].src = defaultImageSource["PET"];
+        } */
+        else if (imgType == "PARAM1" && customGaniPersist == false) {
+          let tryParam = getParamGani(img);
+          if (tryParam != null) {
+            loadInternalGani(tryParam);
+          }
+        }
+
+        defaultImage[imgType] = new Image();
+        defaultImage[imgType].src = getGraalSafeImage(img,(year > 2012 && imgType != "BODY"));
+        setStatus(`Loaded ${file.name} as ${imgType.toLowerCase()}.`);
+      } catch (error) {
+        console.error(error);
+        setStatus(error.message || "Could not load that image.", true);
+      }
     }
+    img.onerror = () => setStatus("Could not decode that image file.", true);
       
   } catch(err) {
-    //console.log(err);
+    console.error(err);
+    setStatus(err.message || "Could not read that image file.", true);
   }
 }
 
@@ -814,20 +887,19 @@ async function loadExternalGani(file) {
   try {
     let contentBuffer = await readFileAsync(file);
     
-    /*
-    if (!(contentBuffer.trim().startsWith("GANI0001") || contentBuffer.trim().startsWith("GANI0FP4"))) {
-      alert(file.name + " is not a valid gani file!");
-      return;
+    if (!isValidGaniText(contentBuffer)) {
+      throw new Error(`${file.name} is not a valid GANI file.`);
     }
-    */
     
-    console.log("loadExternalGani(" + file + ")");
     createGaniFromText(contentBuffer);
+    if (gani.frames.length === 0) throw new Error(`${file.name} has no animation frames.`);
     gani.file = file.name;
     cachedAnis[file.name] = gani;
     updateGaniFileName(file.name);
+    setStatus(`Loaded ${file.name}.`);
   } catch(err) {
-    console.log(err);
+    console.error(err);
+    setStatus(err.message || "Could not read that GANI file.", true);
   }
 }
 
