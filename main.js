@@ -1,4 +1,4 @@
-var version = 1.06;
+var version = 1.07;
 
 var canvas = document.getElementById('canvas');
 var context = canvas.getContext('2d');
@@ -20,7 +20,7 @@ var ox = (canvas.width - 48)/2,oy = (canvas.height - 48)/2,oz = 1;
 var dragging = false,dragx = ox,dragy = oy;
 var pinching = false,pinch = [[ox,oy],[ox,oy]];
 
-var desiredFrameTick, lastTick, aniStepTime = 0;
+var desiredFrameTick, lastTick, ganiTickAccumulator = 0, aniStepTime = 0;
 
 // Convert these default ganis from default to idefault shield position
 var defaultConvertGanis = ["idle.gani","walk.gani","default.gani","walkslow.gani","profile_default.gani"];
@@ -278,49 +278,62 @@ function startAnimating(fps) {
   
   desiredFrameTick = 1000/fps;
   
-  lastTick = Date.now();
-  gameLoop();
+  lastTick = null;
+  ganiTickAccumulator = 0;
+  window.requestAnimationFrame(gameLoop);
  
 }
 
 function gameLoop(timeStamp) {
-  
   window.requestAnimationFrame(gameLoop);
-  
-  let currentTick = Date.now();
-  let timeElapsed = currentTick - lastTick;
 
-  if (timeElapsed > desiredFrameTick) {
-    
-    if (gani != null) {
-      if (gani.singledirection) changeDir(0);
-      
-      if (gani.anistep != null && gani.frames[gani.anistep] != null) {
-        if (gani.frames[gani.anistep].framelength == null) gani.frames[gani.anistep].framelength = 0.05;
-        let nextFrame = Math.max(0,gani.frames[gani.anistep].framelength - 0.05);
-        aniStepTime += 0.05;
-
-        if (aniStepTime > nextFrame) {
-          if (gani.loop) gani.anistep = (gani.anistep+1)%gani.frames.length;
-          else if (gani.anistep < gani.frames.length-1) {
-            gani.anistep = Math.min(gani.frames.length-1,gani.anistep+1);
-          } else if (gani.setbackto != null) {
-            let oldganidir = gani.singledirection ? 2 : gani.dir;
-            loadInternalGani(gani.setbackto);
-            gani.dir = oldganidir;
-            return;
-          }
-          aniStepTime = 0;
-        }
-      }
-    }
-
-    updateAnimatedImages(timeElapsed);
-    
+  if (lastTick == null) {
+    lastTick = timeStamp;
     draw(ox, oy);
-    lastTick = currentTick;
+    return;
   }
-  
+
+  // requestAnimationFrame normally runs at the display refresh rate. Keep its
+  // real elapsed time for GIFs instead of updating them on the 20 fps GANI
+  // clock. The old shared clock made a 100 ms GIF alternate between roughly
+  // 67 ms and 133 ms frames on a 60 Hz display, which looked visibly jerky.
+  let timeElapsed = Math.max(0, Math.min(250, timeStamp - lastTick));
+  lastTick = timeStamp;
+  updateAnimatedImages(timeElapsed);
+
+  // GANI playback is defined in 20 fps (50 ms) ticks. Run that clock at a fixed
+  // step while allowing the canvas and animated assets to render every refresh.
+  ganiTickAccumulator += timeElapsed;
+  while (ganiTickAccumulator >= desiredFrameTick) {
+    advanceGaniAnimation();
+    ganiTickAccumulator -= desiredFrameTick;
+  }
+
+  draw(ox, oy);
+}
+
+function advanceGaniAnimation() {
+  if (gani == null) return;
+  if (gani.singledirection) changeDir(0);
+
+  if (gani.anistep != null && gani.frames[gani.anistep] != null) {
+    if (gani.frames[gani.anistep].framelength == null) gani.frames[gani.anistep].framelength = 0.05;
+    let nextFrame = Math.max(0,gani.frames[gani.anistep].framelength - 0.05);
+    aniStepTime += 0.05;
+
+    if (aniStepTime > nextFrame) {
+      if (gani.loop) gani.anistep = (gani.anistep+1)%gani.frames.length;
+      else if (gani.anistep < gani.frames.length-1) {
+        gani.anistep = Math.min(gani.frames.length-1,gani.anistep+1);
+      } else if (gani.setbackto != null) {
+        let oldganidir = gani.singledirection ? 2 : gani.dir;
+        loadInternalGani(gani.setbackto);
+        gani.dir = oldganidir;
+        return;
+      }
+      aniStepTime = 0;
+    }
+  }
 }
 
 function drawLine(fromx,fromy,destx,desty) {
