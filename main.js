@@ -1,4 +1,4 @@
-var version = 1.07;
+var version = 1.08;
 
 var canvas = document.getElementById('canvas');
 var context = canvas.getContext('2d');
@@ -53,11 +53,11 @@ const MAX_IMAGE_PIXELS = 16 * 1024 * 1024;
 const MAX_GIF_FRAMES = 300;
 const SUPPORTED_FILE_EXTENSIONS = [".gif", ".png", ".gani"];
 
-function setStatus(message, isError = false) {
+function setStatus(message, isError = false, isWarning = false) {
   let status = document.getElementById("status");
   if (status == null) return;
   status.textContent = message;
-  status.style.color = isError ? "#a00" : "#060";
+  status.style.color = isError ? "#a00" : (isWarning ? "#8a5a00" : "#060");
 }
 
 function getFileExtension(fileName) {
@@ -82,6 +82,41 @@ function validateImageDimensions(width, height) {
   if (width * height > MAX_IMAGE_PIXELS) {
     throw new Error("That image is too large to preview safely (limit: 16 megapixels).");
   }
+}
+
+function getPngPaletteCompatibility(arrayBuffer) {
+  let bytes = new Uint8Array(arrayBuffer);
+  let pngSignature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (bytes.length < pngSignature.length || !pngSignature.every((value, index) => bytes[index] === value)) {
+    return { preservePureColors: false };
+  }
+
+  let view = new DataView(arrayBuffer);
+  let offset = 8;
+  let colorType = null;
+  let hasPalette = false;
+  let hasTransparencyChunk = false;
+
+  while (offset + 12 <= bytes.length) {
+    let length = view.getUint32(offset, false);
+    let typeOffset = offset + 4;
+    let dataOffset = offset + 8;
+    let chunkEnd = dataOffset + length + 4;
+    if (chunkEnd > bytes.length) break;
+
+    let type = String.fromCharCode(
+      bytes[typeOffset], bytes[typeOffset + 1], bytes[typeOffset + 2], bytes[typeOffset + 3]
+    );
+    if (type === "IHDR" && length >= 10) colorType = bytes[dataOffset + 9];
+    else if (type === "PLTE") hasPalette = true;
+    else if (type === "tRNS") hasTransparencyChunk = true;
+    else if (type === "IEND") break;
+    offset = chunkEnd;
+  }
+
+  // Indexed PNGs with a tRNS chunk explicitly identify their transparent
+  // palette entry. Any other black or white entry is intentional visible art.
+  return { preservePureColors: colorType === 3 && hasPalette && hasTransparencyChunk };
 }
 
 function isValidGaniText(text) {
@@ -715,6 +750,7 @@ async function loadImageFile(file) {
       return;
     }
 
+    let pngCompatibility = getPngPaletteCompatibility(await readFileAsArrayBuffer(file));
     let contentBuffer = await readImageAsync(file);
     
     let img = new Image();
@@ -767,9 +803,22 @@ async function loadImageFile(file) {
           }
         }
 
+        let safeImage = getGraalSafeImage(
+          img,
+          (year > 2012 && imgType != "BODY"),
+          pngCompatibility.preservePureColors
+        );
         defaultImage[imgType] = new Image();
-        defaultImage[imgType].src = getGraalSafeImage(img,(year > 2012 && imgType != "BODY"));
-        setStatus(`Loaded ${file.name} as ${imgType.toLowerCase()}.`);
+        defaultImage[imgType].src = safeImage.dataUrl;
+        if (safeImage.preservedLegacyColors.length > 0) {
+          setStatus(
+            `Legacy color compatibility: kept visible ${safeImage.preservedLegacyColors.join(" and ")} pixels in ${file.name} because its indexed palette has an explicit transparency entry. Pure black and pure white are deprecated for new Graal assets.`,
+            false,
+            true
+          );
+        } else {
+          setStatus(`Loaded ${file.name} as ${imgType.toLowerCase()}.`);
+        }
       } catch (error) {
         console.error(error);
         setStatus(error.message || "Could not load that image.", true);
@@ -783,55 +832,42 @@ async function loadImageFile(file) {
   }
 }
 
-function getGraalSafeImage(img,fixblackandwhite) {
+function getGraalSafeImage(img,fixblackandwhite,preservePureColors = false) {
   var c = document.createElement('canvas');
   var w = img.width, h = img.height;
   c.width = w;
   c.height = h;
 
   var ctx = c.getContext('2d');
-  
-  //onGetPNGPalette
-  
   var foundblack = false;
   var foundwhite = false;
+  var preservedLegacyColors = [];
 
   ctx.drawImage(img, 0, 0, w, h);
-  
-  if (fixblackandwhite) {
+
+  if (fixblackandwhite || preservePureColors) {
     var imageData = ctx.getImageData(0,0, w, h);
     var pixel = imageData.data;
 
     var r=0, g=1, b=2,a=3;
     for (var p = 0; p<pixel.length; p+=4) {
       if (pixel[p+r] == 255 && pixel[p+g] == 255 && pixel[p+b] == 255 && pixel[p+a] == 255) {
-        if (!foundwhite) window.alert("The color #FFFFFF(255,255,255) white was found in your image! Graal will draw this as transparent so please replace it.");
+        if (!foundwhite && fixblackandwhite && !preservePureColors) window.alert("The color #FFFFFF(255,255,255) white was found in your image! Graal will draw this as transparent so please replace it.");
         foundwhite = true;
-        pixel[p+a] = 0;
+        if (!preservePureColors) pixel[p+a] = 0;
       } else if (pixel[p+r] == 0 && pixel[p+g] == 0 && pixel[p+b] == 0 && pixel[p+a] == 255) {
-        if (!foundblack) window.alert("The color #000000(0,0,0) black was found in your image! Graal will draw this as transparent so please replace it.");
+        if (!foundblack && fixblackandwhite && !preservePureColors) window.alert("The color #000000(0,0,0) black was found in your image! Graal will draw this as transparent so please replace it.");
         foundblack = true;
-        pixel[p+a] = 0;
+        if (!preservePureColors) pixel[p+a] = 0;
       }
     }
 
     ctx.putImageData(imageData,0,0);
   }
 
-  return c.toDataURL('image/png');
-}
-
-/*
-  In the future we will need to load binary PNG and look for PLTE data
-  If found(not all PNGs are indexed) we will extract the palette and do a few things
-   - Bodies use the first 5(technically 7) indices from the palette to recolor the body
-     so we will store those images and when processing the image replace them with new colors
-   - We will need to also scan the PNG binary for tRNS chunks which represent the transparent palette
-     whichever colors match those values we will make transparent as this is what Graal does
-     (and why some colors such as #000000 commonly become transparent as they are often used as transparent values
-*/  
-function onGetPNGPalette() {
-  
+  if (preservePureColors && foundblack) preservedLegacyColors.push("pure black (#000000)");
+  if (preservePureColors && foundwhite) preservedLegacyColors.push("pure white (#FFFFFF)");
+  return { dataUrl: c.toDataURL('image/png'), preservedLegacyColors: preservedLegacyColors };
 }
 
 function getImageType(filename,img) {
